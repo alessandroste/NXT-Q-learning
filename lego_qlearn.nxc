@@ -224,7 +224,7 @@ void updateQ(unsigned int arm, unsigned int hand, unsigned int arm_old, unsigned
 	for (int i=0; i<ARM_STATES; i++)
 		for (int j=0; j<HAND_STATES; j++)
 			for (int k=0; k<NUM_ACTIONS; k++){
-				Q[i][j][k]=Q[i][j][k]+ ALPHA*d*E[i][j][k];
+				Q[i][j][k]=(1-ALPHA)*Q[i][j][k]+ ALPHA*d*E[i][j][k];
 				E[i][j][k]=E[i][j][k]* TAU;
 			}
 }
