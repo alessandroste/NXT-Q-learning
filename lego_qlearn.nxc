@@ -1,0 +1,342 @@
+#define DEBUG
+
+#define ARM_UP			  0
+#define ARM_DOWN		  1
+#define HAND_UP 		  2
+#define HAND_DOWN		  3
+#define NONE              -1
+#define MAXSEQ			  1000	 // max number actions to remember
+#define NUM_ACTIONS       4
+#define ENCODER_PORT      OUT_A
+#define HAND_PORT		  OUT_C
+#define ARM_PORT          OUT_B
+#define ARM_STATES        4
+#define HAND_STATES       4
+#define ARM_INIT_STATE    0
+#define HAND_INIT_STATE   0
+#define ARM_TIME_ON       400
+#define HAND_TIME_ON      300		// because of the different mechanism
+#define ARM_POWER         100
+#define HAND_POWER        100
+#define TAU               0.8
+#define ALPHA             0.5
+#define BETA              0.9
+
+unsigned int sequence[MAXSEQ];				// sequence of actions
+unsigned int sequence_old[MAXSEQ];
+		
+float Q[ARM_STATES][HAND_STATES][NUM_ACTIONS];
+float E[ARM_STATES][HAND_STATES][NUM_ACTIONS];
+
+unsigned int arm_current,  hand_current;
+unsigned int arm_previous,  hand_previous;
+
+unsigned int steps;
+int reward;
+
+#ifdef DEBUG
+void addLog(string what){
+	byte handler;
+	unsigned int size;
+	short writtenbytes;
+    OpenFileAppend("Logged.txt", size, handler);
+    WriteLnString(handler, what, writtenbytes);
+    CloseFile(handler);
+}
+
+void initLog(){
+	byte handler;
+	DeleteFile("Logged.txt");
+	CreateFile("Logged.txt", 2048, handler);
+	CloseFile(handler);
+}
+#endif
+
+void reset(bool init){
+	// set initial position
+	arm_current = ARM_INIT_STATE;
+	hand_current = HAND_INIT_STATE;
+		// position motors
+		long p1 = MotorRotationCount(HAND_PORT);
+		ClearLine(LCD_LINE2); TextOut(0, LCD_LINE2, "Angle HAND");
+		OnRev(HAND_PORT, HAND_POWER);
+		Wait(100);
+		long p2 = MotorRotationCount(HAND_PORT);
+		while((p2- p1) != 0){
+			ClearLine(LCD_LINE3); TextOut(0, LCD_LINE3, NumToStr(p2 - p1));
+			p1 = p2;
+			Wait(100);
+			p2 = MotorRotationCount(HAND_PORT);
+		}
+		Off(HAND_PORT);
+		p1 = MotorRotationCount(ARM_PORT);
+		ClearLine(LCD_LINE2); TextOut(0, LCD_LINE2, "Angle ARM");
+		OnFwd(ARM_PORT, ARM_POWER);
+		Wait(100);
+		p2 = MotorRotationCount(ARM_PORT);
+		while((p2 - p1) != 0){
+			ClearLine(LCD_LINE3); TextOut(0, LCD_LINE3, NumToStr(p2 - p1));
+			p1 = p2;
+			Wait(100);
+			p2 = MotorRotationCount(ARM_PORT);
+		}
+		Off(ARM_PORT);
+		ClearLine(LCD_LINE3);
+	// set Q and E to all zeros
+	for (int i=0; i<ARM_STATES; i++)
+		for (int j=0; j<HAND_STATES; j++)
+			for (int k=0; k<NUM_ACTIONS; k++){
+		if (init){
+			Q[i][j][k]=0;
+			E[i][j][k]=0;
+		} else {
+			E[i][j][k]=0;
+		}
+	}
+	// set policy to all none
+	for (int i = 0; i < MAXSEQ; i++){
+	if (init){
+		sequence_old[i] = NONE;
+	} else {
+		sequence_old[i] = sequence[i];
+	}
+		sequence[i] = NONE;
+	}
+	// reset steps
+	steps = 0;
+	// initial reward
+	reward = 0;
+}
+
+bool checkConvergence(){
+	for (int i = 0; i < steps; i++){
+		if (sequence[i]!=sequence_old[i]) return false;
+	}
+	return true;
+}
+
+unsigned int chooseMovement(unsigned int arm, unsigned int hand){
+	unsigned int choices[NUM_ACTIONS];
+	unsigned int num_of_choices = 0;
+
+  	if (arm > 0){
+  		// arm can be moved down
+		choices[num_of_choices] = ARM_DOWN;
+		num_of_choices++;
+		#ifdef DEBUG
+		addLog("ARM_DOWN possible");
+		#endif
+	}
+	if (arm < ARM_STATES){
+		// arm can be moved up
+		choices[num_of_choices] = ARM_UP;
+		num_of_choices++;
+		#ifdef DEBUG
+		addLog("ARM_UP possible");
+		#endif
+	}
+	if (hand > 0){
+		// hand can be moved down
+		choices[num_of_choices] = HAND_DOWN;
+		num_of_choices++;
+		#ifdef DEBUG
+		addLog("HAND_DOWN possible");
+		#endif
+	}
+	if (hand < HAND_STATES){
+		// hand can be moved up
+		choices[num_of_choices] = HAND_UP;
+		num_of_choices++;
+		#ifdef DEBUG
+		addLog("HAND_UP possible");
+		#endif
+	}
+	
+	// have all the actions the same Q?
+	bool eq = true;
+	float curr_Q = Q[arm][hand][choices[0]];
+	for (int i = 1; i < num_of_choices; i++){
+		if (Q[arm][hand][choices[i]] != curr_Q){
+			eq = false;
+		}
+	}
+	if (!eq){
+    #ifdef DEBUG
+    addLog("Not same Q value for actions");
+    #endif
+		// there's a max Q
+		float bestQ = Q[arm][hand][choices[0]];
+		int best_index = 0;
+		for (int i = 1; i < num_of_choices; i++){
+			if (Q[arm][hand][choices[i]] > bestQ){
+				best_index = i;
+				bestQ = Q[arm][hand][choices[i]];
+			}
+		}
+		return choices[best_index];
+	} else {
+		// they are all equal
+		return choices[Random(num_of_choices)];
+	}
+}
+
+int performMovement(int move){
+	int rotation_initial = MotorRotationCount(ENCODER_PORT);
+    // perform action
+    switch (move){
+		case ARM_UP :
+			OnRev(ARM_PORT, ARM_POWER);
+			Wait(ARM_TIME_ON);
+			Off(ARM_PORT);
+			arm_current++;
+			break;
+		case ARM_DOWN :
+			OnFwd(ARM_PORT, ARM_POWER);
+			Wait(ARM_TIME_ON);
+			Off(ARM_PORT);
+			arm_current--;
+			break;
+		case HAND_UP :
+			OnFwd(HAND_PORT, HAND_POWER);
+			Wait(HAND_TIME_ON);
+			Off(HAND_PORT);
+			hand_current++;
+			break;
+		case HAND_DOWN :
+			OnRev(HAND_PORT, HAND_POWER);
+			Wait(HAND_TIME_ON);
+			Off(HAND_PORT);
+			hand_current--;
+			break;
+	}
+    int rotation_final = MotorRotationCount(ENCODER_PORT);
+    return rotation_final - rotation_initial;
+}
+
+void updateQ(unsigned int arm, unsigned int hand, unsigned int arm_old, unsigned int hand_old, unsigned int move, int rew){
+	float max_Q = Q[arm][hand][0];
+	for (int i=1; i<NUM_ACTIONS; i++){
+		if (Q[arm][hand][i]>max_Q) max_Q=Q[arm][hand][i];
+	}
+	float old_Q = Q[arm_old][hand_old][move];
+	float d = (rew + (BETA* max_Q) - old_Q);
+	E[arm_old][hand_old][move]++;
+	for (int i=0; i<ARM_STATES; i++)
+		for (int j=0; j<HAND_STATES; j++)
+			for (int k=0; k<NUM_ACTIONS; k++){
+				Q[i][j][k]=Q[i][j][k]+ ALPHA*d*E[i][j][k];
+				E[i][j][k]=E[i][j][k]* TAU;
+			}
+}
+
+#ifdef DEBUG
+/* Save current Q matrix in a human readable text file */
+void writeData(){
+	byte handler;
+	short bytesWritten;
+	string write;
+	DeleteFile("Data.txt");
+	CreateFile("Data.txt", 4096, handler);
+	int i,j,k;
+	int larghcella = 15;
+	int larghhead = 21;
+	WriteString(handler,"+---------------------+", bytesWritten);
+	for (i=0; i<NUM_ACTIONS; i++){
+		for (j=0; j<larghcella; j++){
+			WriteString(handler,"-", bytesWritten);
+		}
+		WriteString(handler,"+", bytesWritten);
+	}
+	WriteLnString(handler,"",bytesWritten);
+	for (i=0; i<ARM_STATES; i++)
+		for (j=0; j<HAND_STATES; j++){
+			string row = StrCat("|BRACCIO: ",NumToStr(i),", MANO: ",NumToStr(j));
+			for (int s=0; s<larghhead-(17+StrLen(NumToStr(i))+StrLen(NumToStr(j))); s++) row=StrCat(row," "); // 13 sarebbe 30-i caratteri di braccio e mano
+				for (k=0; k<NUM_ACTIONS; k++){
+					row = StrCat(row, "|");
+					string numb = NumToStr(Q[i][j][k]);
+					for (int s=0; s<larghcella-(StrLen(numb)); s++) row=StrCat(row," ");
+					row = StrCat(row, numb);
+				}
+				row = StrCat(row, "|");
+				WriteLnString(handler,row, bytesWritten);
+		}
+	WriteString(handler,"+---------------------+", bytesWritten);
+	for (i=0; i<NUM_ACTIONS; i++){
+		for (j=0; j<larghcella; j++){
+			WriteString(handler,"-", bytesWritten);
+		}
+		WriteString(handler,"+", bytesWritten);
+	}
+	CloseFile(handler);
+}
+#endif
+
+task main(){
+#ifdef DEBUG
+	initLog();
+#endif
+	reset(true);
+	ClearLine(LCD_LINE1);
+	TextOut(0, LCD_LINE1, "Running");
+	while(ButtonPressed(BTNCENTER, false) == 0){
+		ClearLine(LCD_LINE1);
+		TextOut(0, LCD_LINE1, StrCat("Running, R:",NumToStr(reward)));
+		// if terminal state
+		if (reward > 0){
+#ifdef DEBUG
+			string s="Terminal state, sequence: ";
+			for(int i=0; i<steps; i++){
+				s=StrCat(s," ",NumToStr(sequence[i])," /");
+			}
+			addLog(s);
+#endif
+			// check for convergence
+			if (checkConvergence()){
+				Wait(500);
+				PlayTone(400,300);
+				Wait(100);
+				PlayTone(600,300);
+				ClearLine(LCD_LINE3);
+				TextOut(0, LCD_LINE3, "Convergence");
+				Wait(1000);
+				break;
+			}
+			// reset agent
+			else {
+				ClearLine(LCD_LINE3);
+				TextOut(0, LCD_LINE3, "No convergence");
+				reset(false);
+			}
+		// if not a terminal state
+		} else {
+#ifdef DEBUG
+      addLog("Not a terminal state");
+#endif
+			// save old state
+			arm_previous = arm_current;
+			hand_previous = hand_current;
+			// select move
+			unsigned int chosen_move = chooseMovement(arm_current, hand_current);
+			// perform movement and change state
+			reward = performMovement(chosen_move);
+			// update Q values
+#ifdef DEBUG
+			addLog(StrCat("ARM: ",NumToStr(arm_previous)," -> ",NumToStr(arm_current)));
+			addLog(StrCat("HAND: ",NumToStr(hand_previous)," -> ",NumToStr(hand_current)));
+			addLog(StrCat("move: ",NumToStr(chosen_move)));
+			addLog(StrCat("reward: ",NumToStr(reward)));
+#endif
+			updateQ(arm_current, hand_current, arm_previous, hand_previous, chosen_move, reward);
+			// record to policy
+			sequence[steps] = chosen_move;
+			steps++;
+			// output steps
+			ClearLine(LCD_LINE2); TextOut(0, LCD_LINE2, StrCat("STEP: ", NumToStr(steps)));
+		}
+		ResetSleepTimer();
+	}
+#ifdef DEBUG
+	writeData();
+#endif
+}
